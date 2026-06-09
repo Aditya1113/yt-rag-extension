@@ -58,6 +58,10 @@ function isValidVideoPage() {
 let serverConnectionState = {
   isConnected: false,
   lastError: null,
+  lastErrorCode: null,
+  serverUrl: null,
+  troubleshooting: [],
+  recoveryAction: null,
   lastUpdate: null
 };
 
@@ -466,3 +470,280 @@ function initializeContentScript() {
 // Initialize when script loads
 initializeContentScript();
 });
+
+function handleServerStatusUpdate(message) {
+  const { status, details, recovery } = message;
+  
+  // Update connection state with full details
+  serverConnectionState.isConnected = status === 'CONNECTED';
+  serverConnectionState.lastError = details?.error || null;
+  serverConnectionState.lastErrorCode = details?.errorCode || recovery?.errorCode || null;
+  serverConnectionState.serverUrl = details?.serverUrl || null;
+  serverConnectionState.troubleshooting = details?.troubleshooting || recovery?.troubleshooting || [];
+  serverConnectionState.recoveryAction = details?.recoveryAction || recovery?.action || null;
+  
+  if (status === 'SERVER_UNREACHABLE' || status === 'DISCONNECTED' || status === 'ERROR') {
+    // Build informative error message
+    let errorMessage = getServerErrorMessage(details?.errorCode || recovery?.errorCode, details?.error);
+    
+    showPageNotification(
+      errorMessage,
+      'error',
+      8000,
+      {
+        errorCode: serverConnectionState.lastErrorCode,
+        troubleshooting: serverConnectionState.troubleshooting,
+        recoveryAction: serverConnectionState.recoveryAction
+      }
+    );
+  } else if (status === 'MAX_RECONNECT_ATTEMPTS') {
+    showPageNotification(
+      'Unable to connect to server after multiple attempts. Please start the server manually: python server.py',
+      'error',
+      0, // Don't auto-dismiss
+      {
+        errorCode: 'MAX_RECONNECT_ATTEMPTS',
+        troubleshooting: details?.troubleshooting || [
+          'Start the server: python server.py',
+          'Check if port 5000 is available',
+          'Ensure all dependencies are installed'
+        ],
+        recoveryAction: 'manualRetry',
+        persistent: true
+      }
+    );
+  } else if (status === 'RECONNECTING') {
+    showPageNotification(
+      `Reconnecting to server (attempt ${details?.attempt}/${details?.maxAttempts})...`,
+      'warning',
+      3000
+    );
+  } else if (status === 'CONNECTED' && serverConnectionState.lastError) {
+    // Clear any persistent error notifications
+    clearPersistentNotifications();
+    showPageNotification(
+      'Server connection restored',
+      'success',
+      3000
+    );
+  }
+}
+
+/**
+ * Get user-friendly error message based on error code
+ */
+function getServerErrorMessage(errorCode, fallbackMessage) {
+  const errorMessages = {
+    'CONNECTION_REFUSED': 'Cannot connect to server. Please start the server with: python server.py',
+    'SERVER_UNREACHABLE': 'Server is unreachable. Ensure the server is running on port 5000.',
+    'SERVER_TIMEOUT': 'Server request timed out. The server may be overloaded.',
+    'NETWORK_DISCONNECTED': 'Network connection lost. Please check your internet connection.',
+    'DNS_RESOLUTION_FAILED': 'Could not resolve server address. Check your network settings.',
+    'CONNECTION_RESET': 'Connection was reset. The server may have crashed. Try restarting it.',
+    'SSL_ERROR': 'SSL connection error. The local server uses HTTP, not HTTPS.',
+    'CORS_ERROR': 'Cross-origin request blocked. Restart the server to fix CORS settings.',
+    'MAX_RECONNECT_ATTEMPTS': 'Maximum reconnection attempts reached. Please start the server manually.',
+    'SERVER_OVERLOADED': 'Server is overloaded. Please wait and try again.',
+    'RATE_LIMITED': 'Too many requests. Please wait before trying again.'
+  };
+  
+  return errorMessages[errorCode] || fallbackMessage || 'Server connection error';
+}
+
+/**
+ * Clear any persistent error notifications
+ */
+function clearPersistentNotifications() {
+  const persistentNotifications = document.querySelectorAll('.yt-rag-notification[data-persistent="true"]');
+  persistentNotifications.forEach(notification => {
+    notification.style.opacity = '0';
+    notification.style.transform = 'translateX(100%)';
+    setTimeout(() => notification.remove(), 300);
+  });
+}
+
+function showPageNotification(message, type = 'info', duration = 5000, options = {}) {
+  // Remove any existing non-persistent notification
+  const existing = document.querySelector('.yt-rag-notification:not([data-persistent="true"])');
+  if (existing) {
+    existing.remove();
+  }
+  
+  // If this is a persistent notification and one already exists, update it instead
+  if (options.persistent) {
+    const existingPersistent = document.querySelector('.yt-rag-notification[data-persistent="true"]');
+    if (existingPersistent) {
+      existingPersistent.remove();
+    }
+  }
+  
+  const notification = document.createElement('div');
+  notification.className = 'yt-rag-notification';
+  if (options.persistent) {
+    notification.setAttribute('data-persistent', 'true');
+  }
+  
+  const colors = {
+    success: { bg: '#0d3320', border: '#2dff8c', text: '#2dff8c', icon: '✓' },
+    error: { bg: '#3d1320', border: '#ff2b4e', text: '#ff2b4e', icon: '✕' },
+    warning: { bg: '#3d2d13', border: '#ffb347', text: '#ffb347', icon: '⚠' },
+    info: { bg: '#1a1a2e', border: '#7c5cff', text: '#7c5cff', icon: 'ℹ' }
+  };
+  
+  const color = colors[type] || colors.info;
+  
+  notification.style.cssText = `
+    position: fixed;
+    top: 80px;
+    right: 20px;
+    background: ${color.bg};
+    border: 1px solid ${color.border};
+    color: ${color.text};
+    padding: 12px 16px;
+    border-radius: 8px;
+    font-family: 'Segoe UI', sans-serif;
+    font-size: 13px;
+    z-index: 10000;
+    max-width: 400px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    animation: slideIn 0.3s ease;
+  `;
+  
+  // Build notification content
+  let content = `<div style="display: flex; align-items: flex-start; gap: 10px;">`;
+  content += `<span style="font-size: 16px;">${color.icon}</span>`;
+  content += `<div style="flex: 1;">`;
+  content += `<div style="margin-bottom: ${options.troubleshooting?.length ? '8px' : '0'};">${message}</div>`;
+  
+  // Add troubleshooting tips if provided
+  if (options.troubleshooting && options.troubleshooting.length > 0) {
+    content += `<div style="font-size: 11px; opacity: 0.8; margin-top: 8px; padding-top: 8px; border-top: 1px solid ${color.border}40;">`;
+    content += `<div style="margin-bottom: 4px; font-weight: 600;">Troubleshooting:</div>`;
+    content += `<ul style="margin: 0; padding-left: 16px;">`;
+    options.troubleshooting.slice(0, 3).forEach(tip => {
+      content += `<li style="margin: 2px 0;">${tip}</li>`;
+    });
+    content += `</ul></div>`;
+  }
+  
+  content += `</div>`;
+  
+  // Add close button for persistent notifications
+  if (options.persistent) {
+    content += `<button class="yt-rag-notification-close" style="
+      background: none;
+      border: none;
+      color: ${color.text};
+      cursor: pointer;
+      font-size: 18px;
+      padding: 0;
+      margin-left: 8px;
+      opacity: 0.7;
+      transition: opacity 0.2s;
+    ">×</button>`;
+  }
+  
+  content += `</div>`;
+  
+  notification.innerHTML = content;
+  
+  // Add animation keyframes if not already added
+  if (!document.querySelector('#yt-rag-notification-styles')) {
+    const style = document.createElement('style');
+    style.id = 'yt-rag-notification-styles';
+    style.textContent = `
+      @keyframes slideIn {
+        from { transform: translateX(100%); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
+      }
+      .yt-rag-notification-close:hover {
+        opacity: 1 !important;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+  
+  document.body.appendChild(notification);
+  
+  // Add close button handler for persistent notifications
+  if (options.persistent) {
+    const closeBtn = notification.querySelector('.yt-rag-notification-close');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => {
+        notification.style.opacity = '0';
+        notification.style.transform = 'translateX(100%)';
+        notification.style.transition = 'all 0.3s ease';
+        setTimeout(() => notification.remove(), 300);
+      });
+    }
+  }
+  
+  if (duration > 0 && !options.persistent) {
+    setTimeout(() => {
+      notification.style.opacity = '0';
+      notification.style.transform = 'translateX(100%)';
+      notification.style.transition = 'all 0.3s ease';
+      setTimeout(() => notification.remove(), 300);
+    }, duration);
+  }
+}
+
+async function safeSendMessage(message) {
+  try {
+    const response = await chrome.runtime.sendMessage(message);
+    
+    // Check if response indicates server unreachable
+    if (response && response.success === false) {
+      if (response.errorCode === 'SERVER_UNREACHABLE' || 
+          response.errorCode === 'CONNECTION_REFUSED' ||
+          response.errorCode === 'NETWORK_DISCONNECTED') {
+        // Update local connection state
+        serverConnectionState.isConnected = false;
+        serverConnectionState.lastError = response.error;
+        serverConnectionState.lastErrorCode = response.errorCode;
+        
+        // Show notification if not already showing
+        const errorMessage = getServerErrorMessage(response.errorCode, response.error);
+        showPageNotification(
+          errorMessage,
+          'error',
+          6000,
+          {
+            errorCode: response.errorCode,
+            troubleshooting: response.troubleshooting || [],
+            recoveryAction: response.recoveryAction
+          }
+        );
+      }
+    }
+    
+    return response;
+  } catch (error) {
+    // Handle cases where background script is not available
+    if (error.message?.includes('Receiving end does not exist') ||
+        error.message?.includes('Extension context invalidated')) {
+      console.warn('[Content Script] Background script unavailable:', error.message);
+      
+      showPageNotification(
+        'Extension background script is not available. Try reloading the extension.',
+        'error',
+        5000,
+        {
+          errorCode: 'EXTENSION_UNAVAILABLE',
+          troubleshooting: [
+            'Reload the extension from chrome://extensions',
+            'Refresh this page',
+            'Restart Chrome if the issue persists'
+          ]
+        }
+      );
+      
+      return { 
+        success: false, 
+        error: 'Extension background script is not available. Try reloading the extension.',
+        errorCode: 'EXTENSION_UNAVAILABLE'
+      };
+    }
+    throw error;
+  }
+}
