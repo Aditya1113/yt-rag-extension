@@ -20,13 +20,275 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_BASE_DELAY = 1000;
 /**
- * Reset reconnection state for manual retry
+ * Attempt to reconnect to server with exponential backoff
  */
-function resetReconnectionState() {
-  reconnectAttempts = 0;
-  serverStatus.consecutiveFailures = 0;
-  console.log('[Background] Reconnection state reset');
+async function attemptReconnect() {
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    console.log('[Background] Max reconnection attempts reached');
+    broadcastServerStatus('MAX_RECONNECT_ATTEMPTS', {
+      error: 'Maximum reconnection attempts reached. Please start the server manually.',
+      errorCode: 'MAX_RECONNECT_ATTEMPTS',
+      recoveryAction: 'manualRetry',
+      troubleshooting: [
+        'Start the server: python server.py',
+        'Check the terminal for any error messages',
+        'Ensure all dependencies are installed: pip install flask flask-cors youtube-transcript-api',
+        'Verify port 5000 is not in use by another application'
+      ],
+      serverUrl: SERVER_URL,
+      isRetryable: false
+    });
+    return false;
+  }
+  
+  reconnectAttempts++;
+  const delay = RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts - 1);
+  
+  console.log(`[Background] Reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms`);
+  broadcastServerStatus('RECONNECTING', {
+    attempt: reconnectAttempts,
+    maxAttempts: MAX_RECONNECT_ATTEMPTS,
+    nextRetryIn: delay,
+    serverUrl: SERVER_URL,
+    message: `Attempting to reconnect (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`
+  });
+  
+  await new Promise(resolve => setTimeout(resolve, delay));
+  
+  const connected = await checkServerHealth();
+  if (!connected && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+    return attemptReconnect();
+  }
+  
+  return connected;
 }
+
+/**
+ * Custom error class for network-related errors
+ */
+class NetworkError extends Error {
+  constructor(message, errorCode, details = {}) {
+    super(message);
+    this.name = 'NetworkError';
+    this.isServerError = false;
+    this.errorCode = errorCode;
+    this.recoveryAction = details.recoveryAction || 'checkNetwork';
+    this.isRetryable = details.isRetryable !== false;
+    this.timestamp = Date.now();
+    this.details = details;
+  }
+}
+
+/**
+ * Detect specific server unreachable scenarios from error
+ */
+function detectServerUnreachableType(error) {
+  const errorMessage = error.message?.toLowerCase() || '';
+  const errorName = error.name?.toLowerCase() || '';
+  
+  // Connection refused - server not running
+  if (errorMessage.includes('failed to fetch') || 
+      errorMessage.includes('connection refused') ||
+      errorMessage.includes('econnrefused') ||
+      errorMessage.includes('net::err_connection_refused')) {
+    return {
+      errorCode: 'CONNECTION_REFUSED',
+      message: 'Cannot connect to server. The server may not be running.',
+      recoveryAction: 'showStartInstructions',
+      troubleshooting: [
+        'Start the server with: python server.py',
+        'Ensure Python and required packages are installed',
+        'Check if port 5000 is available'
+      ]
+    };
+  }
+  
+  // Network unreachable
+  if (errorMessage.includes('network') && errorMessage.includes('unreachable') ||
+      errorMessage.includes('net::err_network_changed') ||
+      errorMessage.includes('net::err_internet_disconnected')) {
+    return {
+      errorCode: 'NETWORK_DISCONNECTED',
+      message: 'Network connection lost. Please check your internet connection.',
+      recoveryAction: 'checkNetwork',
+      troubleshooting: [
+        'Check your internet connection',
+        'Try refreshing the page',
+        'Disable VPN if active'
+      ]
+    };
+  }
+  
+  // DNS resolution failed
+  if (errorMessage.includes('dns') || 
+      errorMessage.includes('net::err_name_not_resolved') ||
+      errorMessage.includes('getaddrinfo')) {
+    return {
+      errorCode: 'DNS_RESOLUTION_FAILED',
+      message: 'Could not resolve server address.',
+      recoveryAction: 'showDNSHelp',
+      troubleshooting: [
+        'Check if localhost/127.0.0.1 is accessible',
+        'Try flushing DNS cache',
+        'Check hosts file configuration'
+      ]
+    };
+  }
+  
+  // Connection reset
+  if (errorMessage.includes('connection reset') ||
+      errorMessage.includes('econnreset') ||
+      errorMessage.includes('net::err_connection_reset')) {
+    return {
+      errorCode: 'CONNECTION_RESET',
+      message: 'Connection was reset. The server may have crashed.',
+      recoveryAction: 'reconnect',
+      troubleshooting: [
+        'Restart the server: python server.py',
+        'Check server logs for errors',
+        'Ensure no firewall is blocking the connection'
+      ]
+    };
+  }
+  
+  // Timeout
+  if (error.name === 'AbortError' || 
+      errorMessage.includes('timeout') ||
+      errorMessage.includes('timed out') ||
+      errorMessage.includes('net::err_timed_out')) {
+    return {
+      errorCode: 'SERVER_TIMEOUT',
+      message: 'Server request timed out. The server may be overloaded or unresponsive.',
+      recoveryAction: 'retry',
+      troubleshooting: [
+        'Wait a moment and try again',
+        'Check if the server is processing a large request',
+        'Restart the server if issue persists'
+      ]
+    };
+  }
+  
+  // SSL/TLS errors
+  if (errorMessage.includes('ssl') || 
+      errorMessage.includes('certificate') ||
+      errorMessage.includes('net::err_cert')) {
+    return {
+      errorCode: 'SSL_ERROR',
+      message: 'SSL/TLS connection error.',
+      recoveryAction: 'showSSLHelp',
+      troubleshooting: [
+        'The local server uses HTTP, not HTTPS',
+        'Ensure you\'re connecting to http://127.0.0.1:5000'
+      ]
+    };
+  }
+  
+  // CORS errors
+  if (errorMessage.includes('cors') ||
+      errorMessage.includes('cross-origin') ||
+      errorMessage.includes('access-control-allow-origin')) {
+    return {
+      errorCode: 'CORS_ERROR',
+      message: 'Cross-origin request blocked.',
+      recoveryAction: 'showCORSHelp',
+      troubleshooting: [
+        'Ensure the server has CORS enabled',
+        'Restart the server to apply CORS settings'
+      ]
+    };
+  }
+  
+  // Generic server unreachable
+  return {
+    errorCode: 'SERVER_UNREACHABLE',
+    message: 'Unable to reach the server.',
+    recoveryAction: 'showStartInstructions',
+    troubleshooting: [
+      'Ensure the server is running: python server.py',
+      'Check if port 5000 is available',
+      'Look for error messages in the server terminal'
+    ]
+  };
+}
+
+/**
+ * Create a wrapped fetch with comprehensive error handling
+ */
+async function fetchWithErrorHandling(url, options = {}) {
+  const { timeout = FETCH_TIMEOUT, retries = MAX_RETRIES } = options;
+  let lastError = null;
+  
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          ...options.headers
+        }
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        const error = new Error(errorData.error || `HTTP ${response.status}`);
+        error.statusCode = response.status;
+        error.serverErrorCode = errorData.error_code;
+        error.serverResponse = errorData;
+        error.isServerError = true;
+        throw error;
+      }
+      
+      return response;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      
+      // Detect if this is a server unreachable scenario
+      const unreachableInfo = detectServerUnreachableType(error);
+      
+      // Create appropriate error type
+      if (unreachableInfo.errorCode === 'CONNECTION_REFUSED' || 
+          unreachableInfo.errorCode === 'SERVER_UNREACHABLE') {
+        lastError = new ServerUnreachableError(
+          unreachableInfo.message,
+          unreachableInfo.errorCode,
+          {
+            recoveryAction: unreachableInfo.recoveryAction,
+            troubleshooting: unreachableInfo.troubleshooting,
+            serverUrl: url,
+            originalError: error.message
+          }
+        );
+      } else if (unreachableInfo.errorCode === 'NETWORK_DISCONNECTED' ||
+                 unreachableInfo.errorCode === 'DNS_RESOLUTION_FAILED') {
+        lastError = new NetworkError(
+          unreachableInfo.message,
+          unreachableInfo.errorCode,
+          {
+            recoveryAction: unreachableInfo.recoveryAction,
+            troubleshooting: unreachableInfo.troubleshooting,
+            isRetryable: false,
+            originalError: error.message
+          }
+        );
+      } else {
+        lastError = error;
+        lastError.errorCode = unreachableInfo.errorCode;
+        lastError.recoveryAction = unreachableInfo.recoveryAction;
+        lastError.troubleshooting = unreachableInfo.troubleshooting;
+      }
+      
+      const categorized = categorizeNetworkError(lastError);
+      
+      if (!categorized.isRetryable) {
+        throw lastError;
+      }
 
 /**
  * Create a wrapped fetch with comprehensive error handling
@@ -1016,316 +1278,5 @@ async function getEmbedding(text, apiKey) {
       body: JSON.stringify({ model: 'text-embedding-3-small', input: text }),
     });
     
-    if (!res.ok) {
-      const errorMsg = data.error?.message || `Embedding error (HTTP ${res.status})`;
-      if (res.status === 401) {
-        throw new OpenAIError('Invalid API key. Please check your OpenAI API key.', 'OPENAI_INVALID_KEY');
-      }
-      if (res.status === 429) {
-        throw new OpenAIError('Rate limit exceeded. Please wait a moment and try again.', 'OPENAI_RATE_LIMIT');
-      }
-      if (res.status === 500 || res.status === 503) {
-        throw new OpenAIError('OpenAI service is temporarily unavailable. Please try again later.', 'OPENAI_SERVICE_ERROR');
-      }
-      throw new OpenAIError(errorMsg, 'OPENAI_API_ERROR');
-    }
-    
-    return data.data[0].embedding;
-  } catch (error) {
-    if (error instanceof OpenAIError) throw error;
-    throw new OpenAIError(`Embedding failed: ${error.message}`, 'OPENAI_ERROR');
-  }
-}
 
-async function getBatchEmbeddings(texts, apiKey) {
-  try {
-    const { res, data } = await safeFetch('https://api.openai.com/v1/embeddings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: 'text-embedding-3-small', input: texts }),
-    });
-    
-    if (!res.ok) {
-      const errorMsg = data.error?.message || `Embedding error (HTTP ${res.status})`;
-      if (res.status === 401) {
-        throw new OpenAIError('Invalid API key. Please check your OpenAI API key.', 'OPENAI_INVALID_KEY');
-      }
-      if (res.status === 429) {
-        throw new OpenAIError('Rate limit exceeded. Please wait a moment and try again.', 'OPENAI_RATE_LIMIT');
-      }
-      if (res.status === 500 || res.status === 503) {
-        throw new OpenAIError('OpenAI service is temporarily unavailable. Please try again later.', 'OPENAI_SERVICE_ERROR');
-      }
-      throw new OpenAIError(errorMsg, 'OPENAI_API_ERROR');
-    }
-    
-    return data.data.map(d => d.embedding);
-  } catch (error) {
-    if (error instanceof OpenAIError) throw error;
-    throw new OpenAIError(`Batch embedding failed: ${error.message}`, 'OPENAI_ERROR');
-  }
-}
-
-async function getChatCompletion(messages, apiKey) {
-  try {
-    const { res, data } = await safeFetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: 'gpt-4o-mini', temperature: 0.2, messages }),
-    });
-    
-    if (!res.ok) {
-      const errorMsg = data.error?.message || `Chat error (HTTP ${res.status})`;
-      if (res.status === 401) {
-        throw new OpenAIError('Invalid API key. Please check your OpenAI API key.', 'OPENAI_INVALID_KEY');
-      }
-      if (res.status === 429) {
-        throw new OpenAIError('Rate limit exceeded. Please wait a moment and try again.', 'OPENAI_RATE_LIMIT');
-      }
-      if (res.status === 500 || res.status === 503) {
-        throw new OpenAIError('OpenAI service is temporarily unavailable. Please try again later.', 'OPENAI_SERVICE_ERROR');
-      }
-      throw new OpenAIError(errorMsg, 'OPENAI_API_ERROR');
-    }
-    
-    return data.choices[0].message.content;
-  } catch (error) {
-    if (error instanceof OpenAIError) throw error;
-    throw new OpenAIError(`Chat completion failed: ${error.message}`, 'OPENAI_ERROR');
-  }
-}
-
-// ─── RAG pipeline ─────────────────────────────────────────────────────────────
-
-async function indexVideo(videoId, title, apiKey, sendProgress) {
-  // First check server health
-  sendProgress('Checking server connection…');
-  const healthCheck = await checkServerHealth();
-  if (!healthCheck.connected) {
-    throw new ServerUnreachableError(healthCheck.error || 'Cannot reach local server. Run: python server.py');
-  }
-  
-  sendProgress('Fetching transcript…');
-  const transcript = await fetchTranscript(videoId);
-
-  sendProgress('Splitting into chunks…');
-  const texts = chunkText(transcript, 1000, 200);
-
-  sendProgress(`Embedding ${texts.length} chunks…`);
-  const embeddings = await getBatchEmbeddings(texts, apiKey);
-
-  vectorStore = {
-    videoId, title,
-    chunks: texts.map((text, i) => ({ text, embedding: embeddings[i] })),
-  };
-
-  sendProgress('Ready!');
-  return texts.length;
-}
-
-async function answerQuestion(question, apiKey) {
-  // Check server status before answering (in case we need server for future features)
-  // For now, we only need OpenAI for answering, but this is good practice
-  
-  const qEmbedding = a
 ... [truncated to fit context window]
-
-function categorizeNetworkError(error, isHealthCheck = false) {
-  const errorMessage = error.message?.toLowerCase() || '';
-  const errorName = error.name?.toLowerCase() || '';
-  const statusCode = error.statusCode;
-  const serverErrorCode = error.serverErrorCode;
-  
-  // Server returned an error response
-  if (statusCode) {
-    if (statusCode === 503) {
-      return {
-        message: 'Server is temporarily unavailable. It may be starting up or overloaded.',
-        errorCode: 'SERVER_UNAVAILABLE',
-        recoveryAction: 'retry',
-        isRetryable: true,
-        details: { statusCode, serverErrorCode }
-      };
-    }
-    if (statusCode === 502 || statusCode === 504) {
-      return {
-        message: 'Server gateway error. Please try again in a moment.',
-        errorCode: 'GATEWAY_ERROR',
-        recoveryAction: 'retry',
-        isRetryable: true,
-        details: { statusCode, serverErrorCode }
-      };
-    }
-    if (statusCode >= 500) {
-      return {
-        message: 'Server encountered an internal error. Please try again.',
-        errorCode: serverErrorCode || 'SERVER_ERROR',
-        recoveryAction: 'retry',
-        isRetryable: true,
-        details: { statusCode, serverErrorCode }
-      };
-    }
-    if (statusCode === 429) {
-      return {
-        message: 'Too many requests. Please wait before trying again.',
-        errorCode: 'RATE_LIMITED',
-        recoveryAction: 'waitAndRetry',
-        isRetryable: true,
-        details: { statusCode, retryAfter: 30 }
-      };
-    }
-  }
-  
-  // Connection refused - server not running
-  if (errorMessage.includes('failed to fetch') || 
-      errorMessage.includes('network error') ||
-      errorMessage.includes('connection refused') ||
-      errorMessage.includes('econnrefused') ||
-      errorMessage.includes('net::err_connection_refused')) {
-    return {
-      message: 'Cannot connect to server. Please ensure the Python server is running on port 5000.',
-      errorCode: 'CONNECTION_REFUSED',
-      recoveryAction: 'startServer',
-      isRetryable: true,
-      details: {
-        suggestion: 'Run: python server.py',
-        port: 5000
-      }
-    };
-  }
-  
-  // Server unreachable (different from connection refused)
-  if (errorMessage.includes('net::err_connection_failed') ||
-      errorMessage.includes('net::err_address_unreachable')) {
-    return {
-      message: 'Server address is unreachable. Check if the server URL is correct.',
-      errorCode: 'SERVER_UNREACHABLE',
-      recoveryAction: 'startServer',
-      isRetryable: true,
-      details: {
-        serverUrl: SERVER_URL
-      }
-    };
-  }
-  
-  // Timeout
-  if (errorName === 'aborterror' || 
-      errorMessage.includes('timeout') || 
-      errorMessage.includes('aborted') ||
-      errorMessage.includes('net::err_timed_out')) {
-    return {
-      message: 'Server request timed out. The server may be overloaded or processing a large request.',
-      errorCode: 'SERVER_TIMEOUT',
-      recoveryAction: 'retry',
-      isRetryable: true,
-      details: {
-        suggestion: 'Try again or check server logs for issues'
-      }
-    };
-  }
-  
-  // DNS resolution failure
-  if (errorMessage.includes('dns') || 
-      errorMessage.includes('getaddrinfo') || 
-      errorMessage.includes('name not resolved') ||
-      errorMessage.includes('net::err_name_not_resolved')) {
-    return {
-      message: 'DNS resolution failed. The server hostname could not be resolved.',
-      errorCode: 'DNS_RESOLUTION_FAILED',
-      recoveryAction: 'checkNetwork',
-      isRetryable: true,
-      details: {
-        suggestion: 'Check your network connection and DNS settings'
-      }
-    };
-  }
-  
-  // Network disconnected
-  if (errorMessage.includes('offline') ||
-      errorMessage.includes('net::err_internet_disconnected') ||
-      errorMessage.includes('net::err_network_changed')) {
-    return {
-      message: 'No network connection. Please check your internet connection.',
-      errorCode: 'NETWORK_DISCONNECTED',
-      recoveryAction: 'checkNetwork',
-      isRetryable: true,
-      details: {
-        isOffline: !navigator.onLine
-      }
-    };
-  }
-  
-  // Connection reset
-  if (errorMessage.includes('connection reset') || 
-      errorMessage.includes('econnreset') ||
-      errorMessage.includes('net::err_connection_reset')) {
-    return {
-      message: 'Connection was reset by the server. It may have restarted.',
-      errorCode: 'CONNECTION_RESET',
-      recoveryAction: 'retry',
-      isRetryable: true,
-      details: {
-        suggestion: 'Wait a moment and try again'
-      }
-    };
-  }
-  
-  // Connection closed
-  if (errorMessage.includes('connection closed') || 
-      errorMessage.includes('socket hang up') ||
-      errorMessage.includes('net::err_connection_closed')) {
-    return {
-      message: 'Connection closed unexpectedly. The server may be restarting.',
-      errorCode: 'CONNECTION_CLOSED',
-      recoveryAction: 'retry',
-      isRetryable: true,
-      details: {
-        suggestion: 'Wait a moment and try again'
-      }
-    };
-  }
-  
-  // SSL/TLS errors
-  if (errorMessage.includes('ssl') || 
-      errorMessage.includes('certificate') ||
-      errorMessage.includes('net::err_cert')) {
-    return {
-      message: 'SSL/TLS connection error. There may be a certificate issue.',
-      errorCode: 'SSL_ERROR',
-      recoveryAction: 'checkNetwork',
-      isRetryable: false,
-      details: {
-        suggestion: 'The local server uses HTTP, not HTTPS'
-      }
-    };
-  }
-  
-  // CORS errors
-  if (errorMessage.includes('cors') || 
-      errorMessage.includes('cross-origin') ||
-      errorMessage.includes('access-control-allow-origin')) {
-    return {
-      message: 'CORS error. The server may not be configured correctly.',
-      errorCode: 'CORS_ERROR',
-      recoveryAction: 'startServer',
-      isRetryable: false,
-      details: {
-        suggestion: 'Ensure you are running the correct server.py with CORS enabled'
-      }
-    };
-  }
-  
-  // Default unknown error
-  return {
-    message: isHealthCheck 
-      ? `Unable to reach the server: ${error.message}`
-      : `Request failed: ${error.message}`,
-    errorCode: 'UNKNOWN_ERROR',
-    recoveryAction: 'retry',
-    isRetryable: true,
-    details: {
-      originalError: error.message,
-      errorName: error.name
-    }
-  };
-}
