@@ -79,80 +79,137 @@ let lastKnownServerStatus = null;
  */
 function getRecoveryAction(errorCode) {
   const actions = {
-    'CONNECTION_REFUSED': { text: 'Start Server', action: 'showStartInstructions', icon: '🚀' },
-    'SERVER_UNREACHABLE': { text: 'Start Server', action: 'showStartInstructions', icon: '🚀' },
-    'SERVER_TIMEOUT': { text: 'Retry', action: 'retry', icon: '🔄' },
-    'SERVER_OVERLOADED': { text: 'Wait & Retry', action: 'waitAndRetry', icon: '⏳' },
-    'SERVER_UNAVAILABLE': { text: 'Retry', action: 'retry', icon: '🔄' },
-    'GATEWAY_ERROR': { text: 'Retry', action: 'retry', icon: '🔄' },
-    'SERVER_ERROR': { text: 'Retry', action: 'retry', icon: '🔄' },
-    'RATE_LIMITED': { text: 'Wait', action: 'waitAndRetry', icon: '⏳' },
-    'NETWORK_DISCONNECTED': { text: 'Check Network', action: 'checkNetwork', icon: '📡' },
-    'DNS_RESOLUTION_FAILED': { text: 'Troubleshoot', action: 'showDNSHelp', icon: '🔧' },
-    'CONNECTION_RESET': { text: 'Reconnect', action: 'reconnect', icon: '🔌' },
-    'CONNECTION_CLOSED': { text: 'Reconnect', action: 'reconnect', icon: '🔌' },
-    'SSL_ERROR': { text: 'Help', action: 'showSSLHelp', icon: '🔒' },
-    'CORS_ERROR': { text: 'Help', action: 'showCORSHelp', icon: '⚠️' },
-    'MAX_RECONNECT_ATTEMPTS': { text: 'Manual Retry', action: 'manualRetry', icon: '🔄' },
-    'UNKNOWN_ERROR': { text: 'Retry', action: 'retry', icon: '🔄' }
+    'CONNECTION_REFUSED': { 
+      text: 'Start Server', 
+      action: 'showStartInstructions', 
+      icon: '🚀',
+      description: 'The server is not running',
+      command: 'python server.py'
+    },
+    'SERVER_UNREACHABLE': { 
+      text: 'Start Server', 
+      action: 'showStartInstructions', 
+      icon: '🚀',
+      description: 'Cannot reach the server',
+      command: 'python server.py'
+    },
+    'SERVER_TIMEOUT': { 
+      text: 'Retry', 
+      action: 'retry', 
+      icon: '🔄',
+      description: 'Server took too long to respond'
+    },
+    'SERVER_OVERLOADED': { 
+      text: 'Wait & Retry', 
+      action: 'waitAndRetry', 
+      icon: '⏳',
+      description: 'Server is processing too many requests',
+      waitTime: 5000
+    },
+    'SERVER_UNAVAILABLE': { 
+      text: 'Retry', 
+      action: 'retry', 
+      icon: '🔄',
+      description: 'Server temporarily unavailable'
+    },
+    'GATEWAY_ERROR': { 
+      text: 'Retry', 
+      action: 'retry', 
+      icon: '🔄',
+      description: 'Gateway error occurred'
+    },
+    'SERVER_ERROR': { 
+      text: 'Retry', 
+      action: 'retry', 
+      icon: '🔄',
+      description: 'Internal server error'
+    },
+    'RATE_LIMITED': { 
+      text: 'Wait', 
+      action: 'waitAndRetry', 
+      icon: '⏳',
+      description: 'Too many requests',
+      waitTime: 10000
+    },
+    'NETWORK_DISCONNECTED': { 
+      text: 'Check Network', 
+      action: 'checkNetwork', 
+      icon: '📡',
+      description: 'No internet connection'
+    },
+    'DNS_RESOLUTION_FAILED': { 
+      text: 'Troubleshoot', 
+      action: 'showDNSHelp', 
+      icon: '🔧',
+      description: 'DNS lookup failed'
+    },
+    'CONNECTION_RESET': { 
+      text: 'Reconnect', 
+      action: 'reconnect', 
+      icon: '🔌',
+      description: 'Connection was reset'
+    },
+    'CONNECTION_CLOSED': { 
+      text: 'Reconnect', 
+      action: 'reconnect', 
+      icon: '🔌',
+      description: 'Connection was closed'
+    },
+    'SSL_ERROR': { 
+      text: 'Help', 
+      action: 'showSSLHelp', 
+      icon: '🔒',
+      description: 'SSL/TLS error'
+    },
+    'CORS_ERROR': { 
+      text: 'Help', 
+      action: 'showCORSHelp', 
+      icon: '⚠️',
+      description: 'Cross-origin request blocked'
+    },
+    'MAX_RECONNECT_ATTEMPTS': { 
+      text: 'Manual Retry', 
+      action: 'manualRetry', 
+      icon: '🔄',
+      description: 'Auto-reconnect failed'
+    },
+    'UNKNOWN_ERROR': { 
+      text: 'Retry', 
+      action: 'retry', 
+      icon: '🔄',
+      description: 'An unknown error occurred'
+    }
   };
   
-  return actions[errorCode] || { text: 'Retry', action: 'retry', icon: '🔄' };
+  return actions[errorCode] || { text: 'Retry', action: 'retry', icon: '🔄', description: 'Error occurred' };
 }
 
-function handleRecoveryAction(action, errorCode) {
-  // Disable retry button during action
-  if (retryServerBtn) {
-    retryServerBtn.disabled = true;
-    retryServerBtn.textContent = 'Working...';
-  }
+function handleRecoveryAction(action, errorCode, details = {}) {
+  const recovery = getRecoveryAction(errorCode);
   
   switch (action) {
     case 'showStartInstructions':
-      showStartServerInstructions();
-      if (retryServerBtn) {
-        retryServerBtn.disabled = false;
-        retryServerBtn.textContent = 'Retry Connection';
-      }
+      showServerStartInstructions(details);
       break;
     case 'retry':
-case 'manualRetry':
+    case 'reconnect':
+    case 'manualRetry':
       attemptManualReconnect();
       break;
     case 'waitAndRetry':
-      showWaitAndRetryUI(errorCode);
+      showWaitAndRetryUI(errorCode, recovery.waitTime || 3000);
       break;
-
     case 'checkNetwork':
       showNetworkTroubleshooting();
-      if (retryServerBtn) {
-        retryServerBtn.disabled = false;
-        retryServerBtn.textContent = 'Retry';
-      }
-      break;
-    case 'reconnect':
-      attemptManualReconnect();
       break;
     case 'showDNSHelp':
       showDNSTroubleshooting();
-      if (retryServerBtn) {
-        retryServerBtn.disabled = false;
-        retryServerBtn.textContent = 'Retry';
-      }
       break;
     case 'showSSLHelp':
       showSSLTroubleshooting();
-      if (retryServerBtn) {
-        retryServerBtn.disabled = false;
-        retryServerBtn.textContent = 'Retry';
-      }
       break;
     case 'showCORSHelp':
       showCORSTroubleshooting();
-      if (retryServerBtn) {
-        retryServerBtn.disabled = false;
-        retryServerBtn.textContent = 'Retry';
-      }
       break;
     default:
       attemptManualReconnect();
@@ -162,31 +219,41 @@ case 'manualRetry':
 /**
  * Show wait and retry UI with countdown
  */
-function showWaitAndRetryUI(errorCode) {
-  const waitTime = errorCode === 'RATE_LIMITED' ? 30 : 5;
-  let remaining = waitTime;
+function showWaitAndRetryUI(errorCode, waitTimeMs = 5000) {
+  const recovery = getRecoveryAction(errorCode);
+  const waitTime = Math.ceil((waitTimeMs || 5000) / 1000);
+  let countdown = waitTime;
   
-  const updateCountdown = () => {
-    if (serverStatusText) {
-      serverStatusText.innerHTML = `⏳ Waiting ${remaining}s before retry...`;
-    }
-    if (retryServerBtn) {
-      retryServerBtn.textContent = `Retry in ${remaining}s`;
-      retryServerBtn.disabled = true;
-    }
+  const updateBanner = () => {
+    const progressPercent = ((waitTime - countdown) / waitTime) * 100;
+    
+    showServerBanner(
+      'RECONNECTING',
+      `<strong>⏳ ${recovery.description || 'Please wait...'}</strong><br>
+      <span style="font-size: 10px;">
+        Retrying in ${countdown} second${countdown !== 1 ? 's' : ''}...
+      </span>
+      <div style="margin-top: 6px; height: 3px; background: var(--surface2); border-radius: 2px; overflow: hidden;">
+        <div style="height: 100%; width: ${progressPercent}%; background: var(--warning); transition: width 1s linear;"></div>
+      </div>`,
+      { text: 'Retry Now', action: 'manualRetry', icon: '🔄', errorCode }
+    );
   };
   
-  updateCountdown();
+  updateBanner();
   
-  const countdownInterval = setInterval(() => {
-    remaining--;
-    if (remaining <= 0) {
-      clearInterval(countdownInterval);
+  const interval = setInterval(() => {
+    countdown--;
+    if (countdown <= 0) {
+      clearInterval(interval);
       attemptManualReconnect();
     } else {
-      updateCountdown();
+      updateBanner();
     }
   }, 1000);
+  
+  // Store interval ID so it can be cancelled if user clicks retry
+  window.currentWaitInterval = interval;
 }
 
 /**
@@ -290,33 +357,23 @@ function showStartServerInstructions() {
  * Show network troubleshooting tips
  */
 function showNetworkTroubleshooting() {
-  const isOffline = !navigator.onLine;
-  
-  if (isOffline) {
-    showServerBanner(
-      'ERROR',
-      `<strong>📡 No Internet Connection</strong><br><br>
-      Your device appears to be offline.<br><br>
-      <strong>Please check:</strong><br>
-      • WiFi or ethernet is connected<br>
-      • Airplane mode is off<br>
-      • Router is working properly<br><br>
-      <span style="color: var(--text-dim); font-size: 10px;">The extension will auto-retry when connection is restored.</span>`,
-      { text: 'Retry', action: 'retry' }
-    );
-  } else {
-    showServerBanner(
-      'INSTRUCTIONS',
-      `<strong>📡 Network Issue Detected</strong><br><br>
-      Your internet is connected but the server is unreachable.<br><br>
-      <strong>Please check:</strong><br>
-      • The Python server is running<br>
-      • No firewall is blocking port 5000<br>
-      • Antivirus isn't blocking localhost<br>
-      • Try: <code>curl http://127.0.0.1:5000/ping</code>`,
-      { text: 'Retry', action: 'retry' }
-    );
-  }
+  showServerBanner(
+    'INSTRUCTIONS',
+    `<strong>📡 Network Connection Issue</strong><br>
+    <span style="font-size: 10px; opacity: 0.9;">
+      Unable to reach the server due to a network problem.
+    </span>
+    <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 10px;">
+      <strong>Try these steps:</strong>
+      <ul style="margin: 4px 0 0 0; padding-left: 16px; opacity: 0.8;">
+        <li>Check your internet connection</li>
+        <li>Disable VPN or proxy if active</li>
+        <li>Try refreshing the page</li>
+        <li>Check if other websites are accessible</li>
+      </ul>
+    </div>`,
+    { text: 'Retry Connection', action: 'retry', icon: '🔄', errorCode: 'NETWORK_DISCONNECTED' }
+  );
 }
 
 /**
@@ -979,241 +1036,38 @@ loadBtn.addEventListener('click', async () => {
     if (indexProgress) progressMsg.textContent = indexProgress;
   }, 500);
 
-  chrome.runtime.sendMessage(
-    { action: 'indexVideo', videoId: currentVideoId, title: currentTitle, apiKey },
-    (response) => {
-      clearInterval(pollInterval);
-      isLoading = false;
-      
-      if (chrome.runtime.lastError) {
-        handleIndexError({
-          success: false,
-          error: 'Extension error: ' + chrome.runtime.lastError.message,
-          isServerError: false
-        });
-        return;
-      }
-      
-      if (response && response.success) {
-        markReady(currentTitle, response.chunkCount);
-      } else {
-        handleIndexError(response || { error: 'Unknown error occurred' });
-      }
-    }
-  );
-});
-
-function handleIndexError(response) {
-  statusDot.className = 'status-dot';
-  loadBtn.disabled = false;
-  
-  if (response.isServerError) {
-    // Server-related error
-    serverConnected = false;
-    updateServerStatus('disconnected');
-    showServerBanner(response.error);
-    showServerError(response.error);
-  } else if (response.isOpenAIError) {
-    // OpenAI-related error
-    showError(response.error, 'openai');
-  } else {
-    // Generic error
-    showError(response.error);
-  }
-  
-  updateLoadButtonState();
-}
-
-function showServerError(message) {
-  progressMsg.textContent = `🔌 ${message}`;
-  progressMsg.classList.add('error', 'server-error');
-}
-
-function showError(message, type = 'generic') {
-  progressMsg.classList.remove('server-error');
-  progressMsg.classList.add('error');
-  
-  if (type === 'openai') {
-    progressMsg.textContent = `🤖 ${message}`;
-  } else {
-    progressMsg.textContent = `Error: ${message}`;
-  }
-}
-
-function markReady(title, chunkCount) {
-  isIndexed = true;
-  statusDot.className = 'status-dot ready';
-  progressMsg.textContent = `✓ Indexed ${chunkCount} chunks`;
-  progressMsg.classList.remove('error', 'server-error');
-  loadBtn.textContent = 'RELOAD';
-  loadBtn.disabled = false;
-  questionInput.disabled = false;
-  sendBtn.disabled = false;
-  questionInput.focus();
-  emptyState.querySelector('p').textContent = `Ready! Ask anything about "${truncate(title, 30)}"`;
-  suggestions.style.display = 'flex';
-}
-
-function addMessage(role, content, isError = false, errorType = null) {
-  if (emptyState?.parentNode === chatArea) emptyState.remove();
-  const msg = document.createElement('div');
-  msg.className = `message ${role}`;
-  const sender = document.createElement('div');
-  sender.className = 'sender';
-  sender.textContent = role === 'user' ? 'YOU' : 'AI';
-  const bubble = document.createElement('div');
-  bubble.className = `bubble${isError ? ' error' : ''}`;
-  
-  if (isError && errorType === 'server') {
-    bubble.classList.add('server-error');
-    bubble.innerHTML = `<span class="error-icon">🔌</span> ${escapeHtml(content)}`;
-  } else if (isError && errorType === 'openai') {
-    bubble.innerHTML = `<span class="error-icon">🤖</span> ${escapeHtml(content)}`;
-  } else {
-    bubble.textContent = content;
-  }
-  
-  msg.appendChild(sender);
-  msg.appendChild(bubble);
-  chatArea.appendChild(msg);
-  chatArea.scrollTop = chatArea.scrollHeight;
-}
-
-/**
- * Escape HTML to prevent XSS
- */
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
-}
-
-// Handle suggestion chips
-if (suggestions) {
-  suggestions.addEventListener('click', (e) => {
-    if (e.target.classList.contains('chip') && !questionInput.disabled) {
-      const question = e.target.dataset.q;
-      if (question) {
-        questionInput.value = question;
-        sendQuestion();
-      }
-    }
-  });
-}
-
-// Handle send button and enter key
-if (sendBtn) {
-  sendBtn.addEventListener('click', sendQuestion);
-}
-
-if (questionInput) {
-  questionInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendQuestion();
-    }
-  });
-}
-
-async function sendQuestion() {
-  const question = questionInput.value.trim();
-  if (!question || !isIndexed || questionInput.disabled) return;
-  
-  // Disable input while processing
-  questionInput.disabled = true;
-  sendBtn.disabled = true;
-  questionInput.value = '';
-  
-  // Add user message
-  addMessage('user', question);
-  
-  // Add typing indicator
-  const typingMsg = document.createElement('div');
-  typingMsg.className = 'message ai';
-  typingMsg.innerHTML = `
-    <div class="sender">AI</div>
-    <div class="bubble">
-      <div class="typing">
-        <span></span><span></span><span></span>
-      </div>
-    </div>
-  `;
-  chatArea.appendChild(typingMsg);
-  chatArea.scrollTop = chatArea.scrollHeight;
-  
-  try {
-    const response = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        resolve({ success: false, error: 'Request timed out', errorCode: 'TIMEOUT' });
-      }, 60000); // 60 second timeout for chat
-      
-      chrome.runtime.sendMessage(
-        { action: 'askQuestion', question, apiKey },
-        (response) => {
-          clearTimeout(timeout);
-          if (chrome.runtime.lastError) {
-            resolve({ 
-              success: false, 
-              error: 'Extension error: ' + chrome.runtime.lastError.message 
-            });
-          } else {
-            resolve(response || { success: false, error: 'No response received' });
-          }
-        }
-      );
-    });
-    
-    // Remove typing indicator
-    typingMsg.remove();
-    
-    if (response.success) {
-      addMessage('ai', response.answer);
-    } else {
-      // Determine error type for styling
-      let errorType = 'generic';
-      if (response.isServerError) {
-        errorType = 'server';
-        // Update server status if it's a server error
-        serverConnected = false;
-        updateServerStatus('disconnected');
-        showServerBanner(response.error);
-      } else if (response.isOpenAIError) {
-        errorType = 'openai';
-      }
-      addMessage('ai', response.error, true, errorType);
-    }
-  } catch (error) {
-    // Remove typing indicator
-    typingMsg.remove();
-    addMessage('ai', 'An unexpected error occurred: ' + error.message, true);
-  }
-  
-  // Re-enable input
-  questionInput.disabled = false;
-  sendBtn.disabled = false;
-  questionInput.focus();
-  updateLoadButtonState();
-}
-
-// Initialize
-init();
-
-
-function showServerBanner(error, errorCode, recoveryAction = null) {
-  if (serverStatusBanner && serverStatusText) {
-    const message = getErrorMessage(error, errorCode);
-    serverStatusText.textContent = message;
-    serverStatusBanner.classList.add('visible');
-    
-    // Update retry button based on recovery action
-    if (retryServerBtn) {
-      if (recoveryAction) {
-        retryServerBtn.textContent = recoveryAction.text;
-        retryServerBtn.onclick = () => handleRecoveryAction(recoveryAction.action);
-        retryServerBtn.style.display = 'block';
-      } else {
-        retryServerBtn.textContent = 'Retry';
-        retryServerBtn.onclick = () => {
-          healthCheckRetryCount = 0;
-          c
+  chrome.runti
 ... [truncated to fit context window]
+
+function showServerStartInstructions(details = {}) {
+  const serverUrl = details.serverUrl || 'http://127.0.0.1:5000';
+  const troubleshooting = details.troubleshooting || [
+    'Ensure Python 3.7+ is installed',
+    'Install dependencies: pip install flask flask-cors youtube-transcript-api',
+    'Check if port 5000 is available'
+  ];
+  
+  let troubleshootingHtml = '';
+  if (troubleshooting.length > 0) {
+    troubleshootingHtml = `
+      <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 10px;">
+        <strong>Troubleshooting:</strong>
+        <ul style="margin: 4px 0 0 0; padding-left: 16px; opacity: 0.8;">
+          ${troubleshooting.map(tip => `<li>${tip}</li>`).join('')}
+        </ul>
+      </div>
+    `;
+  }
+  
+  showServerBanner(
+    'INSTRUCTIONS',
+    `<strong>🚀 Server Not Running</strong><br>
+    <span style="font-size: 10px; opacity: 0.9;">
+      The backend server is not reachable at <code style="background: var(--surface2); padding: 1px 4px; border-radius: 2px;">${serverUrl}</code><br><br>
+      <strong>Start the server:</strong><br>
+      <code style="background: var(--surface2); padding: 4px 8px; border-radius: 4px; margin-top: 4px; display: inline-block; font-size: 11px;">python server.py</code>
+    </span>
+    ${troubleshootingHtml}`,
+    { text: 'Retry Connection', action: 'retry', icon: '🔄', errorCode: details.errorCode }
+  );
+}
